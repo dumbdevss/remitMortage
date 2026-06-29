@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import logger from "../utils/logger.js";
 import { pinFileToIPFS, unpinFileFromIPFS } from "../services/ipfs.js";
 import { logUnpinnedCid } from "../services/ipfsAudit.js";
 import { unpinEvidenceCid } from "../services/ipfsCleanup.js";
@@ -151,7 +152,7 @@ milestoneRouter.post("/upload", (req, res, next) => {
       size: file.size,
     });
   } catch (error: any) {
-    console.error("[MilestoneUpload] Error in upload route:", error);
+    logger.error("[MilestoneUpload] Error in upload route", { error });
     return res.status(500).json({
       error: "ipfs_pinning_failed",
       message: error.message || "Failed to upload and pin file to IPFS.",
@@ -195,13 +196,13 @@ milestoneRouter.delete("/unpin/:cid", async (req, res) => {
     });
     return res.json({ cid: result.cid, status: result.status });
   } catch (error: any) {
-    console.warn("[MilestoneUnpin] Error unpinning CID:", error.message);
+    logger.warn("[MilestoneUnpin] Error unpinning CID", { message: error.message });
     await logUnpinnedCid({
       cid,
       success: false,
       error: error.message,
     }).catch((auditError) => {
-      console.warn("[MilestoneUnpin] Failed to write audit log:", auditError);
+      logger.warn("[MilestoneUnpin] Failed to write audit log", { auditError });
     });
     return res.status(500).json({
       error: "ipfs_unpin_failed",
@@ -263,7 +264,7 @@ milestoneRouter.post("/proposals/:id/reject", async (req, res) => {
 
   if (proposal.evidenceCid) {
     unpinEvidenceCid(proposal.evidenceCid, id).catch((err) => {
-      console.warn(`[MilestoneReject] Background unpin failed for proposal ${id}:`, err);
+      logger.warn(`[MilestoneReject] Background unpin failed for proposal ${id}`, { err });
     });
   }
 
