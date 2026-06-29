@@ -38,4 +38,8 @@ pub enum EscrowError {
     NotPendingAdmin = 15,
     /// Cross-contract bridge call to the lending pool failed.
     BridgeFailed = 16,
+    /// Proposed penalty basis points exceed the maximum (10000 = 100%).
+    InvalidPenaltyBps = 18,
+    /// No pending penalty-tier proposal exists to execute.
+    PenaltyProposalNotPending = 19,
 }

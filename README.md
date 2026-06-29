@@ -101,4 +101,5 @@ Comprehensive testnet instructions are available in the docs folder:
 Refer to those guides to deploy contracts, fund wallets, and exercise the full borrower lifecycle on Stellar testnet.
 
 ## License
-MIT
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.

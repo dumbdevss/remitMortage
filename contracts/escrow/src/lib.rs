@@ -13,7 +13,9 @@ mod fuzz_tests;
 pub use crate::errors::EscrowError;
 use crate::token_utils::get_token_client;
 use crate::types::DataKey;
-pub use crate::types::{BorrowerRecord, EscrowConfig, PendingUpgradeRecord};
+pub use crate::types::{
+    BorrowerRecord, EscrowConfig, PendingPenaltyProposal, PendingUpgradeRecord,
+};
 use lending_pool::LendingPoolContractClient;
 use soroban_sdk::auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation};
 use soroban_sdk::{
@@ -97,6 +99,19 @@ impl EscrowContract {
 
     fn read_lending_pool(env: &Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::LendingPool)
+    }
+
+    fn get_pending_penalty(env: &Env) -> Option<PendingPenaltyProposal> {
+        env.storage().instance().get(&DataKey::PendingPenaltyTiers)
+    }
+
+    fn validate_penalty_tiers(tiers: (u32, u32, u32, u32)) -> Result<(), EscrowError> {
+        let (t1, t2, t3, t4) = tiers;
+        if t1 > 10_000 || t2 > 10_000 || t3 > 10_000 || t4 > 10_000 {
+            Err(EscrowError::InvalidPenaltyBps)
+        } else {
+            Ok(())
+        }
     }
 
     fn check_not_paused(env: &Env) -> Result<(), EscrowError> {
@@ -670,6 +685,93 @@ impl EscrowContract {
     /// Returns the configured penalty-fee LendingPool address, if any.
     pub fn get_lending_pool(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::LendingPool)
+    }
+
+    // ── Penalty Tier Governance ────────────────────────────────────────
+
+    /// Propose new early-withdrawal penalty tiers. Admin-only. The change is
+    /// timelocked by the configured upgrade delay: it is stored as a pending
+    /// proposal and only takes effect once `update_penalty_tiers` is called
+    /// after the delay elapses.
+    pub fn propose_penalty_tiers(
+        env: Env,
+        tier1: u32,
+        tier2: u32,
+        tier3: u32,
+        tier4: u32,
+    ) -> Result<(), EscrowError> {
+        let config = Self::get_config(&env)?;
+        config.admin.require_auth();
+        Self::validate_penalty_tiers((tier1, tier2, tier3, tier4))?;
+
+        let delay: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(0u32);
+
+        let execute_after = env.ledger().sequence() + delay;
+
+        let proposal = PendingPenaltyProposal {
+            tier1,
+            tier2,
+            tier3,
+            tier4,
+            execute_after,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPenaltyTiers, &proposal);
+
+        env.events().publish(
+            (symbol_short!("pen_prop"),),
+            (tier1, tier2, tier3, tier4, execute_after),
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    /// Execute a pending penalty-tier proposal once its timelock has elapsed.
+    /// Admin-only.
+    pub fn update_penalty_tiers(env: Env) -> Result<(), EscrowError> {
+        let mut config = Self::get_config(&env)?;
+        config.admin.require_auth();
+
+        let pending = Self::get_pending_penalty(&env)
+            .ok_or(EscrowError::PenaltyProposalNotPending)?;
+
+        if env.ledger().sequence() < pending.execute_after {
+            return Err(EscrowError::UpgradeTimelockActive);
+        }
+
+        config.penalty_bps_tier1 = pending.tier1;
+        config.penalty_bps_tier2 = pending.tier2;
+        config.penalty_bps_tier3 = pending.tier3;
+        config.penalty_bps_tier4 = pending.tier4;
+
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPenaltyTiers);
+
+        env.events().publish(
+            (symbol_short!("pen_upd"),),
+            (pending.tier1, pending.tier2, pending.tier3, pending.tier4),
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    /// Returns the pending penalty-tier proposal, if any.
+    pub fn get_pending_penalty_tiers(env: Env) -> Option<PendingPenaltyProposal> {
+        Self::get_pending_penalty(&env)
     }
 
     // ── Admin Transfer ─────────────────────────────────────────────────

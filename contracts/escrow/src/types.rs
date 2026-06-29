@@ -60,6 +60,23 @@ pub struct PendingUpgradeRecord {
     pub execute_after: u32,
 }
 
+/// Pending early-withdrawal penalty-tier change (used when a timelock delay is
+/// active). Holds the proposed tier basis points and when they may be applied.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingPenaltyProposal {
+    /// Proposed tier 1 penalty (months 1-2) in basis points.
+    pub tier1: u32,
+    /// Proposed tier 2 penalty (months 3-4) in basis points.
+    pub tier2: u32,
+    /// Proposed tier 3 penalty (months 5-6) in basis points.
+    pub tier3: u32,
+    /// Proposed tier 4 penalty (month 7+) in basis points.
+    pub tier4: u32,
+    /// The ledger sequence after which this proposal may execute.
+    pub execute_after: u32,
+}
+
 /// Storage keys for the escrow contract.
 #[contracttype]
 #[derive(Clone)]
@@ -83,4 +100,7 @@ pub enum DataKey {
     /// Optional LendingPool contract address that early-exit penalty fees are
     /// routed to as investor yield. Unset means penalties stay in the contract.
     LendingPool,
+    /// Pending early-withdrawal penalty-tier proposal (present only while a
+    /// timelocked change is awaiting execution).
+    PendingPenaltyTiers,
 }
