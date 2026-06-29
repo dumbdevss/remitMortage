@@ -6,6 +6,7 @@ members = [
     "integration-tests",
     "lending-pool",
     "milestone",
+    "multisig-validator",
     "verification-registry",
 ]
 
