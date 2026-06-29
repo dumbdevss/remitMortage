@@ -17,6 +17,7 @@
     "@stellar/stellar-sdk": "^13.1.0",
     "axios": "^1.7.9",
     "bs58": "^6.0.0",
+    "cls-rtracer": "^2.6.4",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
