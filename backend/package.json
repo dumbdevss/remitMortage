@@ -9,6 +9,7 @@
     "lint": "eslint src/",
     "docs:export": "tsx src/docs/export-openapi.ts",
     "test": "jest",
+    "test:coverage": "jest --coverage",
     "test:integration": "jest --testPathPattern='prismaSchemaDrift' --no-coverage",
     "test:drift": "jest src/__tests__/prismaSchemaDrift.test.ts --no-coverage",
     "drift:check": "bash ./scripts/detect-prisma-drift.sh",
@@ -102,6 +103,19 @@
     ],
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "coverageReporters": [
+      "text-summary",
+      "lcov",
+      "cobertura"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 60,
+        "branches": 45,
+        "functions": 55,
+        "lines": 60
+      }
     }
   }
 }

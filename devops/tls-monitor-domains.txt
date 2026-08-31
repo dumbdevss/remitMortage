@@ -1,0 +1,30 @@
+# Public-facing endpoints whose TLS certificates are monitored for expiry by
+# scripts/check-tls-cert-expiry.sh (run on a schedule from
+# .github/workflows/tls-cert-expiry.yml).
+#
+# Format, one entry per line:
+#
+#     host[:port] [auto|manual]
+#
+#   - port defaults to 443
+#   - second field forces the renewal classification:
+#       auto    renewal is automated (Let's Encrypt / AWS ACM) — an alert here
+#               means the automation has stalled
+#       manual  a human must reissue and redeploy — an alert here is a task
+#     omit it to auto-detect from the certificate issuer
+#   - blank lines and '#' comments are ignored
+#
+# In CI the effective list is taken from the TLS_MONITOR_DOMAINS repo variable
+# when it is set; this file is the fallback and the documented shape. Replace
+# the placeholders below with the real production apex + subdomains (see
+# devops/variables.tf: app_domain_name, www_domain_name).
+
+# ── Frontend (CloudFront + AWS ACM certificate) ─────────────────────────────
+app.remitmortgage.example            auto
+www.remitmortgage.example            auto
+
+# ── Backend API (App Runner managed certificate) ───────────────────────────
+api.remitmortgage.example            auto
+
+# ── Example of an endpoint terminated by a manually managed certificate ────
+# status.remitmortgage.example       manual
