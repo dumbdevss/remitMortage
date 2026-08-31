@@ -1,4 +1,12 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
+
+/// Admin-controlled signer set used for death/incapacity attestations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeneficiaryAttestorConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
 
 /// Configuration set during contract initialization.
 #[contracttype]

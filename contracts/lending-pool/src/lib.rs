@@ -335,6 +335,34 @@ impl LendingPoolContract {
             .set(&DataKey::BorrowerLifetimeInterest(borrower.clone()), &total);
     }
 
+    // ── Per-Borrower Active-Loan Cap Helpers ─────────────────────────────
+
+    /// Number of loans currently in `Requested` or `Approved` state for this
+    /// borrower. A missing entry means zero.
+    fn read_borrower_active_loans(env: &Env, borrower: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BorrowerActiveLoans(borrower.clone()))
+            .unwrap_or(0)
+    }
+
+    fn set_borrower_active_loans(env: &Env, borrower: &Address, count: u32) {
+        let key = DataKey::BorrowerActiveLoans(borrower.clone());
+        if count == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &count);
+        }
+    }
+
+    /// Decrement the borrower's active-loan counter when a loan leaves an
+    /// active state (repaid, cancelled or defaulted), freeing a slot.
+    /// Saturates at zero so an accounting mismatch can never underflow.
+    fn release_borrower_loan_slot(env: &Env, borrower: &Address) {
+        let current = Self::read_borrower_active_loans(env, borrower);
+        Self::set_borrower_active_loans(env, borrower, current.saturating_sub(1));
+    }
+
     fn is_rebate_claimed(env: &Env, loan_id: &BytesN<32>) -> bool {
         env.storage()
             .persistent()
@@ -757,6 +785,9 @@ impl LendingPoolContract {
             // No deposit floor at deployment, so existing integrations are
             // unaffected until an admin sets one via `set_min_deposit_amount`.
             min_deposit_amount: 0,
+            // No per-borrower active-loan cap at deployment; an admin opts in
+            // via `set_borrower_active_loan_cap`.
+            max_active_loans_per_borrower: 0,
             // No refinancing cooldown by default.
             refinance_cooldown_ledgers: 0,
             // No per-transaction withdrawal cap at deployment, so existing
@@ -1007,6 +1038,16 @@ impl LendingPoolContract {
             return Err(PoolError::LoanAlreadyExists);
         }
 
+        // Enforce the per-borrower active-loan cap, when one is configured.
+        // `0` disables the cap. An "active" loan is one in Requested or
+        // Approved state; the counter is released when a loan is repaid,
+        // cancelled or defaulted.
+        let active_loan_cap = Self::read_config(env)?.max_active_loans_per_borrower;
+        let borrower_active_loans = Self::read_borrower_active_loans(env, &borrower);
+        if active_loan_cap != 0 && borrower_active_loans >= active_loan_cap {
+            return Err(PoolError::BorrowerLoanCapExceeded);
+        }
+
         let interest_rate_bps = Self::resolve_borrower_interest_rate(env, &borrower)?;
 
         let loan = LoanRecord {
@@ -1026,6 +1067,9 @@ impl LendingPoolContract {
         };
 
         Self::set_loan(env, &loan_id, &loan);
+
+        // Track the new loan against the borrower's active-loan count.
+        Self::set_borrower_active_loans(env, &borrower, borrower_active_loans + 1);
 
         // Increment loan count.
         let count: u32 = env
@@ -1130,6 +1174,9 @@ impl LendingPoolContract {
         loan.status = LoanStatus::Cancelled;
         Self::set_loan(&env, &loan_id, &loan);
 
+        // Cancelling a still-pending request frees the borrower's slot.
+        Self::release_borrower_loan_slot(&env, &loan.borrower);
+
         let count = Self::read_loan_count(&env);
         env.storage()
             .instance()
@@ -1170,7 +1217,7 @@ impl LendingPoolContract {
     ) -> Result<(), PoolError> {
         Self::check_not_paused(&env)?;
 
-        let mut loan = Self::read_loan(&env, &loan_id)?;
+        let loan = Self::read_loan(&env, &loan_id)?;
         loan.borrower.require_auth();
 
         if loan.status != LoanStatus::Approved {
@@ -2053,6 +2100,9 @@ impl LendingPoolContract {
         if loan.outstanding_debt == 0 {
             loan.status = LoanStatus::Repaid;
 
+            // Full repayment frees the borrower's active-loan slot.
+            Self::release_borrower_loan_slot(&env, &loan.borrower);
+
             // Release any undisbursed locked commitments
             let undisbursed = loan.principal - loan.disbursed;
             if undisbursed > 0 {
@@ -2412,6 +2462,9 @@ impl LendingPoolContract {
         loan.repaid = loan.repaid.saturating_add(seized_amount);
         loan.outstanding_debt = net_loss;
         Self::set_loan(&env, &loan_id, &loan);
+
+        // A defaulted loan is no longer active; free the borrower's slot.
+        Self::release_borrower_loan_slot(&env, &loan.borrower);
 
         env.storage()
             .instance()
@@ -3147,7 +3200,7 @@ impl LendingPoolContract {
 
         // Transfer loan obligations to new borrower
         loan.borrower = new_borrower;
-        Self::write_loan(&env, &loan_id, &loan);
+        Self::set_loan(&env, &loan_id, &loan);
 
         // Remove pending assumption request
         env.storage()
@@ -3444,6 +3497,23 @@ impl LendingPoolContract {
             .unwrap_or(0)
     }
 
+    /// Set the maximum number of simultaneously active loans (in `Requested`
+    /// or `Approved` state) a single borrower address may hold. Admin-only.
+    ///
+    /// Caps risk concentration on any one borrower: once at the cap, that
+    /// borrower cannot originate another loan until an existing one is
+    /// repaid, cancelled or defaulted.
+    ///
+    /// Pass `0` to disable the cap. Raising or lowering the cap never
+    /// disturbs loans that already exist — the limit is only checked at
+    /// origination — so lowering it below a borrower's current count simply
+    /// blocks new requests until they drop back under the new ceiling.
+    pub fn set_borrower_active_loan_cap(env: Env, max_loans: u32) -> Result<(), PoolError> {
+        let mut config = Self::read_config(&env)?;
+        config.admin.require_auth();
+
+        let previous = config.max_active_loans_per_borrower;
+        config.max_active_loans_per_borrower = max_loans;
     /// Set the refinancing cooldown period in ledgers.
     ///
     /// `0` disables the cooldown entirely (the deployment default).
@@ -3457,11 +3527,26 @@ impl LendingPoolContract {
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
+        env.events()
+            .publish((Symbol::new(&env, "set_max_loans"),), (previous, max_loans));
         env.events().publish((symbol_short!("set_rcool"),), cooldown);
 
         Ok(())
     }
 
+    /// Get the configured per-borrower active-loan cap. `0` means no cap.
+    pub fn get_borrower_active_loan_cap(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, PoolConfig>(&DataKey::Config)
+            .map(|config| config.max_active_loans_per_borrower)
+            .unwrap_or(0)
+    }
+
+    /// Get the number of currently-active loans (in `Requested` or `Approved`
+    /// state) held by `borrower`.
+    pub fn get_borrower_active_loans(env: Env, borrower: Address) -> u32 {
+        Self::read_borrower_active_loans(&env, &borrower)
     /// Get the currently configured refinancing cooldown in ledgers.
     pub fn get_refinance_cooldown_ledgers(env: Env) -> u32 {
         env.storage()
@@ -5889,6 +5974,123 @@ mod test {
 
         let result = client.try_set_origination_fee_bps(&(BPS_SCALE + 1));
         assert_eq!(result.unwrap_err(), Ok(PoolError::OriginationFeeTooHigh));
+    }
+
+    // ── Per-Borrower Active-Loan Cap ─────────────────────────────────────
+
+    #[test]
+    fn test_active_loan_cap_blocks_origination_at_the_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _investor, _treasury, _token, client) = setup_pool(&env);
+        let borrower = Address::generate(&env);
+        let principal = 10_000_0000000i128;
+
+        client.set_borrower_active_loan_cap(&2);
+        assert_eq!(client.get_borrower_active_loan_cap(), 2);
+
+        let loan_a = BytesN::from_array(&env, &[0xA1u8; 32]);
+        let loan_b = BytesN::from_array(&env, &[0xB2u8; 32]);
+        let loan_c = BytesN::from_array(&env, &[0xC3u8; 32]);
+
+        // Up to and including the cap is allowed.
+        client.request_loan(&borrower, &loan_a, &principal);
+        client.request_loan(&borrower, &loan_b, &principal);
+        assert_eq!(client.get_borrower_active_loans(&borrower), 2);
+
+        // The loan that would exceed the cap is rejected.
+        let blocked = client.try_request_loan(&borrower, &loan_c, &principal);
+        assert_eq!(blocked.unwrap_err(), Ok(PoolError::BorrowerLoanCapExceeded));
+        assert_eq!(client.get_borrower_active_loans(&borrower), 2);
+
+        // The cap is per borrower, not global: a different borrower is free
+        // to originate.
+        let other_borrower = Address::generate(&env);
+        client.request_loan(&other_borrower, &loan_c, &principal);
+        assert_eq!(client.get_borrower_active_loans(&other_borrower), 1);
+    }
+
+    #[test]
+    fn test_active_loan_cap_frees_a_slot_when_a_loan_is_cancelled_or_repaid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        // 0% interest keeps outstanding debt flat so a full repayment is exact.
+        let (_admin, investor, _treasury, token_address, client) =
+            setup_pool_with_rates(&env, 0u32, 0u32);
+        let sac = StellarAssetClient::new(&env, &token_address);
+        let borrower = Address::generate(&env);
+        let principal = 10_000_0000000i128;
+
+        client.set_borrower_active_loan_cap(&1);
+        sac.mint(&investor, &(principal * 4));
+        client.deposit(&investor, &(principal * 4), &Tranche::Senior);
+
+        let loan_a = BytesN::from_array(&env, &[0xA1u8; 32]);
+        let loan_b = BytesN::from_array(&env, &[0xB2u8; 32]);
+        let loan_c = BytesN::from_array(&env, &[0xC3u8; 32]);
+
+        // At the cap after one request.
+        client.request_loan(&borrower, &loan_a, &principal);
+        assert_eq!(
+            client
+                .try_request_loan(&borrower, &loan_b, &principal)
+                .unwrap_err(),
+            Ok(PoolError::BorrowerLoanCapExceeded)
+        );
+
+        // Cancelling the pending request frees the slot.
+        client.cancel_loan(&loan_a);
+        assert_eq!(client.get_borrower_active_loans(&borrower), 0);
+
+        // A fresh loan can now be originated, taken through to full repayment.
+        client.request_loan(&borrower, &loan_b, &principal);
+        client.approve_loan(&loan_b);
+        client.add_contractor(&borrower);
+        client.disburse(&loan_b, &borrower, &principal);
+        assert_eq!(client.get_borrower_active_loans(&borrower), 1);
+
+        sac.mint(&borrower, &principal);
+        client.repay(&borrower, &loan_b, &principal);
+        assert_eq!(client.get_loan_info(&loan_b).status, LoanStatus::Repaid);
+        assert_eq!(client.get_borrower_active_loans(&borrower), 0);
+
+        // Repaying the loan freed the slot for another origination.
+        client.request_loan(&borrower, &loan_c, &principal);
+        assert_eq!(client.get_borrower_active_loans(&borrower), 1);
+    }
+
+    #[test]
+    fn test_active_loan_cap_setter_is_admin_only_and_zero_disables_it() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _investor, _treasury, _token, client) = setup_pool(&env);
+        let borrower = Address::generate(&env);
+        let principal = 10_000_0000000i128;
+
+        // A non-admin cannot change the cap.
+        let attacker = Address::generate(&env);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &attacker,
+                invoke: &MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "set_borrower_active_loan_cap",
+                    args: (1u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_borrower_active_loan_cap(&1);
+        assert!(result.is_err());
+
+        // Default (0) means no cap: the borrower can stack loans freely.
+        assert_eq!(client.get_borrower_active_loan_cap(), 0);
+        for seed in 0u8..4 {
+            let loan_id = BytesN::from_array(&env, &[seed; 32]);
+            client.request_loan(&borrower, &loan_id, &principal);
+        }
+        assert_eq!(client.get_borrower_active_loans(&borrower), 4);
     }
 
     /// Deploys and initializes an InsurancePool bound to `client`, and wires

@@ -60,6 +60,14 @@ pub struct PoolConfig {
     /// behaviour is unchanged until an admin opts in via
     /// `set_min_deposit_amount`.
     pub min_deposit_amount: i128,
+    /// Maximum number of simultaneously active loans (in `Requested` or
+    /// `Approved` state) a single borrower address may hold. Caps protocol
+    /// risk concentration on any one borrower.
+    ///
+    /// `0` — the deployment default — disables the cap entirely, so existing
+    /// behaviour is unchanged until an admin opts in via
+    /// `set_borrower_active_loan_cap`.
+    pub max_active_loans_per_borrower: u32,
     /// Minimum number of ledgers between consecutive refinancing requests on
     /// the same loan. Prevents borrowers from repeatedly refinancing in short
     /// succession to game interest rate timing. `0` disables the cooldown.
@@ -320,6 +328,10 @@ pub enum DataKey {
     HalvingEpoch,
     /// Lifetime interest paid by a borrower, keyed by borrower address.
     BorrowerLifetimeInterest(Address),
+    /// Count of currently-active loans (in `Requested` or `Approved` state)
+    /// held by a borrower, keyed by borrower address. Used to enforce
+    /// `max_active_loans_per_borrower`.
+    BorrowerActiveLoans(Address),
     /// Tracks whether a loan's maturity rebate has been claimed.
     LoanRebateClaimed(BytesN<32>),
     /// Collateral tracking for a loan (partial releases).

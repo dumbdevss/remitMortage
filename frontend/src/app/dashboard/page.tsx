@@ -34,6 +34,7 @@ import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSo
 import { useWidgetStore, WidgetId } from '../stores/useWidgetStore';
 import { SortableWidget } from '../../components/dashboard/SortableWidget';
 import { WidgetSettingsModal } from '../../components/dashboard/WidgetSettingsModal';
+import { track } from "../../lib/analytics";
 
 
 const Navbar = loadDynamic(() => import("../../components/Navbar"), { ssr: false });
@@ -122,6 +123,10 @@ export default function DashboardPage() {
   const [milestones, setMilestones] = useState<MilestoneNode[]>([]);
   const [recoveryPlan, setRecoveryPlan] = useState<ReturnType<typeof generateRecoveryPlan> | null>(null);
   const [showRecoveryTimeline, setShowRecoveryTimeline] = useState(false);
+
+  useEffect(() => {
+    if (isConnected && publicKey) track("borrower_dashboard_viewed");
+  }, [isConnected, publicKey]);
 
   const { order, visibility, setOrder } = useWidgetStore();
   const sensors = useSensors(

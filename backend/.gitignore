@@ -3,3 +3,4 @@ dist/
 openapi.json
 .env
 *.log
+coverage/
